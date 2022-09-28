@@ -1,5 +1,2 @@
-/shairport
-/*.o
-/config.mk
-/config.h
-/version.h
+build/
+.idea/
