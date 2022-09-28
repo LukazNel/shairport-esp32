@@ -24,14 +24,11 @@
  * OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#include <memory.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
-#include <arpa/inet.h>
 #include <netdb.h>
 #include <sys/select.h>
-#include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -39,13 +36,12 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
-#include <openssl/md5.h>
+#include "esp_rom_md5.h"
 
 #include "common.h"
 #include "player.h"
 #include "rtp.h"
-#include "mdns.h"
-#include "metadata.h"
+#include "shairport_mdns.h"
 
 #ifdef AF_INET6
 #define INETx_ADDRSTRLEN INET6_ADDRSTRLEN
@@ -85,7 +81,7 @@ static void rtsp_take_player(void) {
         debug(1, "shutting down playing thread\n");
         // XXX minor race condition between please_shutdown and signal delivery
         please_shutdown = 1;
-        pthread_kill(playing_thread, SIGUSR1);
+        //pthread_kill(playing_thread, SIGUSR1);
         pthread_mutex_lock(&playing_mutex);
     }
     playing_thread = pthread_self();
@@ -452,69 +448,6 @@ static void handle_set_parameter_parameter(rtsp_conn_info *conn,
     }
 }
 
-static void handle_set_parameter_metadata(rtsp_conn_info *conn,
-                                          rtsp_message   *req,
-                                          rtsp_message   *resp) {
-    char *cp = req->content;
-    int cl   = req->contentlength;
-
-    unsigned int off = 8;
-
-    while (off < cl) {
-        char tag[5];
-        strncpy(tag, cp+off, 4);
-        tag[4] = '\0';
-        off += 4;
-
-        uint32_t vl = ntohl(*(uint32_t *)(cp+off));
-        off += sizeof(uint32_t);
-
-        char *val = malloc(vl+1);
-        strncpy(val, cp+off, vl);
-        val[vl] = '\0';
-        off += vl;
-
-        debug(2, "Tag: %s   Content: %s\n", tag, val);
-
-        if (!strncmp(tag, "asal ", 4)) {
-            debug(1, "META Album: %s\n", val);
-            metadata_set(&player_meta.album, val);
-        } else if (!strncmp(tag, "asar ", 4)) {
-            debug(1, "META Artist: %s\n", val);
-            metadata_set(&player_meta.artist, val);
-        } else if (!strncmp(tag, "ascm ", 4)) {
-            debug(1, "META Comment: %s\n", val);
-            metadata_set(&player_meta.comment, val);
-        } else if (!strncmp(tag, "asgn ", 4)) {
-            debug(1, "META Genre: %s\n", val);
-            metadata_set(&player_meta.genre, val);
-        } else if (!strncmp(tag, "minm ", 4)) {
-            debug(1, "META Title: %s\n", val);
-            metadata_set(&player_meta.title, val);
-        }
-
-        free(val);
-    }
-
-    metadata_write();
-}
-
-static void handle_set_parameter_coverart(rtsp_conn_info *conn,
-                                          rtsp_message *req, rtsp_message *resp) {
-    char *cp = req->content;
-    int cl = req->contentlength;
-
-    char *ct = msg_get_header(req, "Content-Type");
-
-    if (!strncmp(ct, "image/jpeg", 10)) {
-        metadata_cover_image(cp, cl, "jpg");
-    } else if (!strncmp(ct, "image/png", 9)) {
-        metadata_cover_image(cp, cl, "png");
-    } else {
-        metadata_cover_image(NULL, 0, NULL);
-    }
-}
-
 static void handle_set_parameter(rtsp_conn_info *conn,
                                  rtsp_message *req, rtsp_message *resp) {
     if (!req->contentlength)
@@ -525,17 +458,7 @@ static void handle_set_parameter(rtsp_conn_info *conn,
     if (ct) {
         debug(2, "SET_PARAMETER Content-Type: %s\n", ct);
 
-        if (!strncmp(ct, "application/x-dmap-tagged", 25)) {
-            debug(1, "received metadata tags in SET_PARAMETER request\n");
-
-            handle_set_parameter_metadata(conn, req, resp);
-        } else if (!strncmp(ct, "image/jpeg", 10) ||
-                   !strncmp(ct, "image/png", 9)   ||
-                   !strncmp(ct, "image/none", 10)) {
-            debug(1, "received image in SET_PARAMETER request\n");
-
-            handle_set_parameter_coverart(conn, req, resp);
-         } else if (!strncmp(ct, "text/parameters", 15)) {
+         if (!strncmp(ct, "text/parameters", 15)) {
             debug(1, "received parameters in SET_PARAMETER request\n");
 
             handle_set_parameter_parameter(conn, req, resp);
@@ -732,34 +655,34 @@ static int rtsp_auth(char **nonce, rtsp_message *req, rtsp_message *resp) {
     *quote = 0;
 
     uint8_t digest_urp[16], digest_mu[16], digest_total[16];
-    MD5_CTX ctx;
-    MD5_Init(&ctx);
-    MD5_Update(&ctx, username, strlen(username));
-    MD5_Update(&ctx, ":", 1);
-    MD5_Update(&ctx, realm, strlen(realm));
-    MD5_Update(&ctx, ":", 1);
-    MD5_Update(&ctx, config.password, strlen(config.password));
-    MD5_Final(digest_urp, &ctx);
+    md5_context_t ctx;
+    esp_rom_md5_init(&ctx);
+    esp_rom_md5_update(&ctx, username, strlen(username));
+    esp_rom_md5_update(&ctx, ":", 1);
+    esp_rom_md5_update(&ctx, realm, strlen(realm));
+    esp_rom_md5_update(&ctx, ":", 1);
+    esp_rom_md5_update(&ctx, config.password, strlen(config.password));
+    esp_rom_md5_final(digest_urp, &ctx);
 
-    MD5_Init(&ctx);
-    MD5_Update(&ctx, req->method, strlen(req->method));
-    MD5_Update(&ctx, ":", 1);
-    MD5_Update(&ctx, uri, strlen(uri));
-    MD5_Final(digest_mu, &ctx);
+    esp_rom_md5_init(&ctx);
+    esp_rom_md5_update(&ctx, req->method, strlen(req->method));
+    esp_rom_md5_update(&ctx, ":", 1);
+    esp_rom_md5_update(&ctx, uri, strlen(uri));
+    esp_rom_md5_final(digest_mu, &ctx);
 
     int i;
     char buf[33];
     for (i=0; i<16; i++)
         sprintf(buf + 2*i, "%02x", digest_urp[i]);
-    MD5_Init(&ctx);
-    MD5_Update(&ctx, buf, 32);
-    MD5_Update(&ctx, ":", 1);
-    MD5_Update(&ctx, *nonce, strlen(*nonce));
-    MD5_Update(&ctx, ":", 1);
+    esp_rom_md5_init(&ctx);
+    esp_rom_md5_update(&ctx, buf, 32);
+    esp_rom_md5_update(&ctx, ":", 1);
+    esp_rom_md5_update(&ctx, *nonce, strlen(*nonce));
+    esp_rom_md5_update(&ctx, ":", 1);
     for (i=0; i<16; i++)
         sprintf(buf + 2*i, "%02x", digest_mu[i]);
-    MD5_Update(&ctx, buf, 32);
-    MD5_Final(digest_total, &ctx);
+    esp_rom_md5_update(&ctx, buf, 32);
+    esp_rom_md5_final(digest_total, &ctx);
 
     for (i=0; i<16; i++)
         sprintf(buf + 2*i, "%02x", digest_total[i]);
@@ -865,7 +788,7 @@ void rtsp_listen_loop(void) {
 
     ret = getaddrinfo(NULL, portstr, &hints, &info);
     if (ret) {
-        die("getaddrinfo failed: %s", gai_strerror(ret));
+        die("getaddrinfo failed: %d", ret);
     }
 
     for (p=info; p; p=p->ai_next) {

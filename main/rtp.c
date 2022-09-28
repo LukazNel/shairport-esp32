@@ -101,8 +101,8 @@ static int bind_port(SOCKADDR *remote) {
 
     int ret = getaddrinfo(NULL, "0", &hints, &info);
 
-    if (ret < 0)
-        die("failed to get usable addrinfo?! %s", gai_strerror(ret));
+    //if (ret < 0)
+    //    die("failed to get usable addrinfo?! %s", gai_strerror(ret));
 
     sock = socket(remote->SAFAMILY, SOCK_DGRAM, IPPROTO_UDP);
     ret = bind(sock, info->ai_addr, info->ai_addrlen);
@@ -169,7 +169,7 @@ void rtp_shutdown(void) {
 
     debug(2, "shutting down RTP thread\n");
     please_shutdown = 1;
-    pthread_kill(rtp_thread, SIGUSR1);
+    //pthread_kill(rtp_thread, SIGUSR1);
     void *retval;
     pthread_join(rtp_thread, &retval);
     running = 0;

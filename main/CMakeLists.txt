@@ -1,3 +1,2 @@
-idf_component_register(SRCS "shairport.c" "daemon.c" "rtsp.c" "mdns.c" "mdns_external.c" "mdns_tinysvcmdns.c"
-        "common.c" "rtp.c" "metadata.c" "player.c" "alac.c" "audio.c" "audio_dummy.c" "audio_pipe.c" "tinysvcmdns.c"
+idf_component_register(SRCS "shairport.c" "common.c" "rtsp.c" "shairport_mdns.c" "rtp.c" "player.c" "alac.c"
         INCLUDE_DIRS ".")

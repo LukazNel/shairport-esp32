@@ -30,7 +30,7 @@
 #include <string.h>
 #include <sys/types.h>
 #include <pthread.h>
-#include <openssl/aes.h>
+#include "mbedtls/aes.h"
 #include <math.h>
 #include <sys/stat.h>
 #include <sys/signal.h>
@@ -50,7 +50,7 @@
 
 // parameters from the source
 static unsigned char *aesiv;
-static AES_KEY aes;
+static mbedtls_aes_context aes;
 static int sampling_rate, frame_size;
 
 #define FRAME_BYTES(frame_size) (4*frame_size)
@@ -114,7 +114,7 @@ static void alac_decode(short *dest, uint8_t *buf, int len) {
     unsigned char iv[16];
     int aeslen = len & ~0xf;
     memcpy(iv, aesiv, sizeof(iv));
-    AES_cbc_encrypt(buf, packet, aeslen, &aes, iv, AES_DECRYPT);
+    mbedtls_aes_crypt_ecb(&aes, MBEDTLS_AES_DECRYPT, buf, packet);
     memcpy(packet+aeslen, buf+aeslen, len-aeslen);
 
     int outsize;
@@ -506,7 +506,8 @@ int player_play(stream_cfg *stream) {
         die("specified buffer starting fill %d > buffer size %d",
             config.buffer_start_fill, BUFFER_FRAMES);
 
-    AES_set_decrypt_key(stream->aeskey, 128, &aes);
+    mbedtls_aes_init(&aes);
+    mbedtls_aes_setkey_dec(&aes, stream->aeskey, 128);
     aesiv = stream->aesiv;
     init_decoder(stream->fmtp);
     // must be after decoder init

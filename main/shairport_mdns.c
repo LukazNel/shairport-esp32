@@ -1,0 +1,92 @@
+/*
+ * mDNS registration handler. This file is part of Shairport.
+ * Copyright (c) James Laird 2013
+ * All rights reserved.
+ *
+ * Permission is hereby granted, free of charge, to any person
+ * obtaining a copy of this software and associated documentation
+ * files (the "Software"), to deal in the Software without
+ * restriction, including without limitation the rights to use,
+ * copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be
+ * included in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+ * OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+ * HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+ * WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+ * OTHER DEALINGS IN THE SOFTWARE.
+ */
+
+#include <string.h>
+#include "common.h"
+#include "shairport_mdns.h"
+
+#include "esp_log.h"
+#include "mdns.h"
+
+void mdns_register(void) {
+    char *mdns_apname = malloc(strlen(config.apname) + 14);
+    char *p = mdns_apname;
+    int i;
+    for (i=0; i<6; i++) {
+        sprintf(p, "%02X", config.hw_addr[i]);
+        p += 2;
+    }
+    *p++ = '@';
+    strcpy(p, config.apname);
+
+    // room for name + .local + NULL
+    char hostname[100 + 6] = "AirDAC";
+    //gethostname(hostname, 99);
+    // according to POSIX, this may be truncated without a final NULL !
+    hostname[99] = 0;
+
+    // will not work if the hostname doesn't end in .local
+    char *hostend = hostname + strlen(hostname);
+    if ((strlen(hostname) > 6) &&
+        strcmp(hostend - 6, ".local"))
+    {
+        strcat(hostname, ".local");
+    }
+    //char * hostname = generate_hostname();
+
+    //initialize mDNS
+    ESP_ERROR_CHECK( mdns_init() );
+    //set mDNS hostname (required if you want to advertise services)
+    ESP_ERROR_CHECK( mdns_hostname_set(hostname) );
+    ESP_LOGI(TAG, "mdns hostname set to: [%s]", hostname);
+    //set default mDNS instance name
+    ESP_ERROR_CHECK( mdns_instance_name_set(EXAMPLE_MDNS_INSTANCE) );
+
+    //free(hostname);
+
+    mdns_txt_item_t txt[] = {
+            {"tp", "UDP"},
+            {"sm", "false"},
+            {"ek", "1"},
+            {"et", "0,1"},
+            {"cn", "0,1"},
+            {"ch", "2"},
+            {"ss", "16"},
+            {"sr", "44100"},
+            {"vn", "3"}, 
+            {"txtvers", "1"},
+            {"da", "true"},
+            {"md", "0,1,2"},
+            {"pw", config.password ? "true" : "false"}
+    };
+
+    ESP_ERROR_CHECK( mdns_service_add(mdns_apname, "_raop", "_tcp", config.port, txt, 12) );
+}
+
+void mdns_unregister(void) {
+
+}
+

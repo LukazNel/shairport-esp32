@@ -29,13 +29,12 @@
 #include <stdlib.h>
 #include <memory.h>
 #include <unistd.h>
-#include <openssl/rsa.h>
-#include <openssl/pem.h>
-#include <openssl/evp.h>
-#include <openssl/bio.h>
-#include <openssl/buffer.h>
+#include "mbedtls/base64.h"
+#include <mbedtls/pk.h>
+#include <mbedtls/error.h>
+#include <mbedtls/entropy.h>
+#include <mbedtls/ctr_drbg.h>
 #include "common.h"
-#include "daemon.h"
 
 shairport_cfg config;
 
@@ -48,8 +47,6 @@ void die(char *format, ...) {
     va_start(args, format);
 
     vfprintf(stderr, format, args);
-    if (config.daemonise)
-        daemon_fail(format, args); // Send error message to parent
 
     va_end(args);
 
@@ -77,51 +74,33 @@ void debug(int level, char *format, ...) {
 
 
 char *base64_enc(uint8_t *input, int length) {
-    BIO *bmem, *b64;
-    BUF_MEM *bptr;
-    b64 = BIO_new(BIO_f_base64());
-    bmem = BIO_new(BIO_s_mem());
-    b64 = BIO_push(b64, bmem);
-    BIO_set_flags(b64, BIO_FLAGS_BASE64_NO_NL);
-    BIO_write(b64, input, length);
-    BIO_flush(b64);
-    BIO_get_mem_ptr(b64, &bptr);
+    int bufsize = length*4/3;
+    unsigned char *buf = (unsigned char *)malloc(bufsize);
+    mbedtls_base64_encode(buf, bufsize, NULL, input, length);
 
-    char *buf = (char *)malloc(bptr->length);
-    if (bptr->length) {
-        memcpy(buf, bptr->data, bptr->length-1);
-        buf[bptr->length-1] = 0;
-    }
+    // Remove pad
+    buf[bufsize-1] = 0;
 
-    BIO_free_all(bmem);
-
-    return buf;
+    return (char*)buf;
 }
 
 uint8_t *base64_dec(char *input, int *outlen) {
-    BIO *bmem, *b64;
     int inlen = strlen(input);
 
-    b64 = BIO_new(BIO_f_base64());
-    BIO_set_flags(b64, BIO_FLAGS_BASE64_NO_NL);
-    bmem = BIO_new(BIO_s_mem());
-    b64 = BIO_push(b64, bmem);
+    char* inbuf = (char *)malloc(inlen+4);
+    strcpy(inbuf, input);
 
     // Apple cut the padding off their challenges; restore it
-    BIO_write(bmem, input, inlen);
+    char pad = '=';
     while (inlen++ & 3)
-        BIO_write(bmem, "=", 1);
-    BIO_flush(bmem);
+        strncat(inbuf, &pad, 1);
 
-    int bufsize = strlen(input)*3/4 + 1;
+    int bufsize = inlen*3/4 + 1;
     uint8_t *buf = malloc(bufsize);
-    int nread;
 
-    nread = BIO_read(b64, buf, bufsize);
+    mbedtls_base64_decode(buf, bufsize, (size_t*)outlen, (unsigned char *)inbuf, strlen(inbuf));
 
-    BIO_free_all(bmem);
-
-    *outlen = nread;
+    free(inbuf);
     return buf;
 }
 
@@ -150,35 +129,65 @@ static char super_secret_key[] =
 "2gG0N5hvJpzwwhbhXqFKA4zaaSrw622wDniAK5MlIE0tIAKKP4yxNGjoD2QYjhBGuhvkWKY=\n"
 "-----END RSA PRIVATE KEY-----";
 
-uint8_t *rsa_apply(uint8_t *input, int inlen, int *outlen, int mode) {
-    static RSA *rsa = NULL;
+/**
+ * Return a string representation of an mbedtls error code
+ */
+static char* mbedtlsError(int errnum) {
+    static char buffer[200];
+    mbedtls_strerror(errnum, buffer, sizeof(buffer));
+    return buffer;
+} // mbedtlsError
 
-    if (!rsa) {
-        BIO *bmem = BIO_new_mem_buf(super_secret_key, -1);
-        rsa = PEM_read_bio_RSAPrivateKey(bmem, NULL, NULL, NULL);
-        BIO_free(bmem);
+uint8_t *rsa_apply(uint8_t *input, int inlen, int *outlen, int mode) {
+    int ret = 0;
+    mbedtls_pk_context pk;
+    mbedtls_pk_init(&pk);
+
+    if ( (ret = mbedtls_pk_parse_key(&pk, (unsigned char*)super_secret_key, strlen(super_secret_key),
+                                     NULL, 0)) != 0 ) {
+        die("mbedtls_pk_parse_key error %s\n", mbedtlsError(ret)); //-0x%04x\n", -ret);
     }
 
-    uint8_t *out = malloc(RSA_size(rsa));
+    mbedtls_entropy_context entropy;
+    mbedtls_ctr_drbg_context ctr_drbg;
+    mbedtls_ctr_drbg_init(&ctr_drbg);
+    mbedtls_entropy_init(&entropy);
+
+    const char* pers="MyEntropy";
+
+    mbedtls_ctr_drbg_seed(
+            &ctr_drbg,
+            mbedtls_entropy_func,
+            &entropy,
+            (const unsigned char*)pers,
+            strlen(pers));
+
+    uint8_t *out = malloc(mbedtls_pk_get_len(&pk));
     switch (mode) {
         case RSA_MODE_AUTH:
-            *outlen = RSA_private_encrypt(inlen, input, out, rsa,
-                                          RSA_PKCS1_PADDING);
+            ret = mbedtls_rsa_rsaes_pkcs1_v15_encrypt(mbedtls_pk_rsa(pk), mbedtls_ctr_drbg_random, &ctr_drbg,
+                                                 MBEDTLS_RSA_PRIVATE, inlen, input, out);
             break;
         case RSA_MODE_KEY:
-            *outlen = RSA_private_decrypt(inlen, input, out, rsa,
-                                          RSA_PKCS1_OAEP_PADDING);
+            ret = mbedtls_rsa_rsaes_oaep_decrypt(mbedtls_pk_rsa(pk), mbedtls_ctr_drbg_random, &ctr_drbg,
+             MBEDTLS_RSA_PRIVATE, NULL, 0, (size_t*)outlen, input, out, sizeof(out));
             break;
         default:
             die("bad rsa mode");
     }
+    if (ret != 0)
+        die("rsa_apply error: %s\n", mbedtlsError(ret));
+
+    mbedtls_ctr_drbg_free(&ctr_drbg);
+    mbedtls_entropy_free(&entropy);
+    mbedtls_pk_free(&pk);
     return out;
 }
 
 void command_start(void) {
     if (!config.cmd_start)
         return;
-    if (!config.cmd_blocking && fork())
+    if (!config.cmd_blocking)
         return;
 
     debug(1, "running start command: %s", config.cmd_start);
@@ -192,7 +201,7 @@ void command_start(void) {
 void command_stop(void) {
     if (!config.cmd_stop)
         return;
-    if (!config.cmd_blocking && fork())
+    if (!config.cmd_blocking)
         return;
 
     debug(1, "running stop command: %s", config.cmd_stop);
