@@ -42,20 +42,7 @@ void mdns_register(void) {
     *p++ = '@';
     strcpy(p, config.apname);
 
-    // room for name + .local + NULL
-    char hostname[100 + 6] = "AirDAC";
-    //gethostname(hostname, 99);
-    // according to POSIX, this may be truncated without a final NULL !
-    hostname[99] = 0;
-
-    // will not work if the hostname doesn't end in .local
-    char *hostend = hostname + strlen(hostname);
-    if ((strlen(hostname) > 6) &&
-        strcmp(hostend - 6, ".local"))
-    {
-        strcat(hostname, ".local");
-    }
-    //char * hostname = generate_hostname();
+    char * hostname = generate_hostname();
 
     //initialize mDNS
     ESP_ERROR_CHECK( mdns_init() );
@@ -65,7 +52,7 @@ void mdns_register(void) {
     //set default mDNS instance name
     ESP_ERROR_CHECK( mdns_instance_name_set(EXAMPLE_MDNS_INSTANCE) );
 
-    //free(hostname);
+    free(hostname);
 
     mdns_txt_item_t txt[] = {
             {"tp", "UDP"},
@@ -80,7 +67,7 @@ void mdns_register(void) {
             {"txtvers", "1"},
             {"da", "true"},
             {"md", "0,1,2"},
-            {"pw", config.password ? "true" : "false"}
+            {"pw", "false"}
     };
 
     ESP_ERROR_CHECK( mdns_service_add(mdns_apname, "_raop", "_tcp", config.port, txt, 12) );

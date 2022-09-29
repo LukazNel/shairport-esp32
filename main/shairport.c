@@ -31,6 +31,14 @@
 #include "rtsp.h"
 #include "shairport_mdns.h"
 
+#include <string.h>
+#include "esp_system.h"
+#include "esp_event.h"
+#include "nvs_flash.h"
+#include "esp_netif.h"
+#include "protocol_examples_common.h"
+#include "netdb.h"
+
 static const char *version = "Version 1.0";
 
 
@@ -59,15 +67,21 @@ void shairport_startup_complete(void) {
 void app_main(void) {
     printf("Starting Shairport %s\n", version);
 
+    ESP_ERROR_CHECK(nvs_flash_init());
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    ESP_ERROR_CHECK(example_connect());
+
     memset(&config, 0, sizeof(config));
 
     // set defaults
     config.buffer_start_fill = 220;
     config.port = 5002;
-    char hostname[100] = "AirDAC";
-    //gethostname(hostname, 100);
-    config.apname = malloc(20 + 100);
+    char* hostname = generate_hostname();
+    config.apname = malloc(20 + strlen(hostname));
     snprintf(config.apname, 20 + 100, "Shairport on %s", hostname);
+    free(hostname);
 
     // mDNS supports maximum of 63-character names (we append 13).
     if (strlen(config.apname) > 50)

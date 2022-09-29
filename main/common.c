@@ -28,7 +28,6 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <memory.h>
-#include <unistd.h>
 #include "mbedtls/base64.h"
 #include <mbedtls/pk.h>
 #include <mbedtls/error.h>
@@ -64,22 +63,27 @@ void warn(char *format, ...) {
 }
 
 void debug(int level, char *format, ...) {
-    if (level > debuglev)
-        return;
+    //if (level > debuglev)
+    //    return;
     va_list args;
     va_start(args, format);
     vfprintf(stderr, format, args);
     va_end(args);
 }
 
+#define CONFIG_MDNS_HOSTNAME   "ESP-WROVER"
+#define CONFIG_MDNS_INSTANCE   "ESP with mDNS"
 
+char* generate_hostname(void)
+{
+    return strdup(CONFIG_MDNS_HOSTNAME);
+}
 char *base64_enc(uint8_t *input, int length) {
-    int bufsize = length*4/3;
-    unsigned char *buf = (unsigned char *)malloc(bufsize);
-    mbedtls_base64_encode(buf, bufsize, NULL, input, length);
+    int bufsize = length*4/3 + 5;
+    unsigned char *buf = malloc(bufsize);
 
-    // Remove pad
-    buf[bufsize-1] = 0;
+    size_t olen;
+    mbedtls_base64_encode(buf, bufsize, &olen, input, length);
 
     return (char*)buf;
 }
@@ -87,7 +91,7 @@ char *base64_enc(uint8_t *input, int length) {
 uint8_t *base64_dec(char *input, int *outlen) {
     int inlen = strlen(input);
 
-    char* inbuf = (char *)malloc(inlen+4);
+    char* inbuf = malloc(inlen+4);
     strcpy(inbuf, input);
 
     // Apple cut the padding off their challenges; restore it
@@ -95,7 +99,7 @@ uint8_t *base64_dec(char *input, int *outlen) {
     while (inlen++ & 3)
         strncat(inbuf, &pad, 1);
 
-    int bufsize = inlen*3/4 + 1;
+    int bufsize = (inlen-1)*3/4;
     uint8_t *buf = malloc(bufsize);
 
     mbedtls_base64_decode(buf, bufsize, (size_t*)outlen, (unsigned char *)inbuf, strlen(inbuf));
@@ -104,7 +108,7 @@ uint8_t *base64_dec(char *input, int *outlen) {
     return buf;
 }
 
-static char super_secret_key[] =
+static const char super_secret_key[] =
 "-----BEGIN RSA PRIVATE KEY-----\n"
 "MIIEpQIBAAKCAQEA59dE8qLieItsH1WgjrcFRKj6eUWqi+bGLOX1HL3U3GhC/j0Qg90u3sG/1CUt\n"
 "wC5vOYvfDmFI6oSFXi5ELabWJmT2dKHzBJKa3k9ok+8t9ucRqMd6DZHJ2YCCLlDRKSKv6kDqnw4U\n"
@@ -143,7 +147,7 @@ uint8_t *rsa_apply(uint8_t *input, int inlen, int *outlen, int mode) {
     mbedtls_pk_context pk;
     mbedtls_pk_init(&pk);
 
-    if ( (ret = mbedtls_pk_parse_key(&pk, (unsigned char*)super_secret_key, strlen(super_secret_key),
+    if ( (ret = mbedtls_pk_parse_key(&pk, (unsigned char*)super_secret_key, strlen(super_secret_key)+1,
                                      NULL, 0)) != 0 ) {
         die("mbedtls_pk_parse_key error %s\n", mbedtlsError(ret)); //-0x%04x\n", -ret);
     }
@@ -162,21 +166,27 @@ uint8_t *rsa_apply(uint8_t *input, int inlen, int *outlen, int mode) {
             (const unsigned char*)pers,
             strlen(pers));
 
-    uint8_t *out = malloc(mbedtls_pk_get_len(&pk));
+    uint8_t *out = NULL;
+    mbedtls_rsa_context* ctx;
     switch (mode) {
         case RSA_MODE_AUTH:
-            ret = mbedtls_rsa_rsaes_pkcs1_v15_encrypt(mbedtls_pk_rsa(pk), mbedtls_ctr_drbg_random, &ctr_drbg,
-                                                 MBEDTLS_RSA_PRIVATE, inlen, input, out);
+            out = malloc(256);
+            ret = mbedtls_rsa_pkcs1_encrypt(mbedtls_pk_rsa(pk), mbedtls_ctr_drbg_random, &ctr_drbg,
+                MBEDTLS_RSA_PRIVATE, inlen, input, out);
+            *outlen = 256;
             break;
         case RSA_MODE_KEY:
-            ret = mbedtls_rsa_rsaes_oaep_decrypt(mbedtls_pk_rsa(pk), mbedtls_ctr_drbg_random, &ctr_drbg,
-             MBEDTLS_RSA_PRIVATE, NULL, 0, (size_t*)outlen, input, out, sizeof(out));
+            ctx = mbedtls_pk_rsa(pk);
+            mbedtls_rsa_set_padding(ctx, MBEDTLS_RSA_PKCS_V21, MBEDTLS_MD_SHA1);
+            out = malloc(16);
+            ret = mbedtls_rsa_pkcs1_decrypt(ctx, mbedtls_ctr_drbg_random, &ctr_drbg,
+             MBEDTLS_RSA_PRIVATE, (size_t*)outlen, input, out, 16);
             break;
         default:
             die("bad rsa mode");
     }
     if (ret != 0)
-        die("rsa_apply error: %s\n", mbedtlsError(ret));
+        die("rsa_apply mode %d error: %s\n", mode, mbedtlsError(ret));
 
     mbedtls_ctr_drbg_free(&ctr_drbg);
     mbedtls_entropy_free(&entropy);

@@ -47,6 +47,8 @@ void debug(int level, char *format, ...);
 #define read_unchecked(...)  (void)(read (__VA_ARGS__)+1)
 #define lockf_unchecked(...) (void)(lockf(__VA_ARGS__)+1)
 
+char* generate_hostname(void);
+
 uint8_t *base64_dec(char *input, int *outlen);
 char *base64_enc(uint8_t *input, int length);
 
