@@ -48,7 +48,7 @@ void mdns_register(void) {
     ESP_ERROR_CHECK( mdns_init() );
     //set mDNS hostname (required if you want to advertise services)
     ESP_ERROR_CHECK( mdns_hostname_set(hostname) );
-    ESP_LOGI(TAG, "mdns hostname set to: [%s]", hostname);
+    ESP_LOGI("TEST", "mdns hostname set to: [%s]", hostname);
     //set default mDNS instance name
     ESP_ERROR_CHECK( mdns_instance_name_set(EXAMPLE_MDNS_INSTANCE) );
 
@@ -66,7 +66,7 @@ void mdns_register(void) {
             {"vn", "3"}, 
             {"txtvers", "1"},
             {"da", "true"},
-            {"md", "0,1,2"},
+            {"md", "0"},
             {"pw", "false"}
     };
 

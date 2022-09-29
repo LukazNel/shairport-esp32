@@ -31,14 +31,6 @@
 #include "rtsp.h"
 #include "shairport_mdns.h"
 
-#include <string.h>
-#include "esp_system.h"
-#include "esp_event.h"
-#include "nvs_flash.h"
-#include "esp_netif.h"
-#include "protocol_examples_common.h"
-#include "netdb.h"
-
 static const char *version = "Version 1.0";
 
 
@@ -50,7 +42,7 @@ void shairport_shutdown(int retval) {
     shutting_down = 1;
     printf("Shutting down...\n");
     mdns_unregister();
-    rtsp_shutdown_stream();
+    //rtsp_shutdown_stream();
     if (config.output)
         config.output->deinit();
     //daemon_exit(); // This does nothing if not in daemon mode
@@ -64,14 +56,10 @@ void shairport_startup_complete(void) {
     }
 }
 
-void app_main(void) {
+extern audio_output audio_dummy;
+
+void start_shairport(void* args) {
     printf("Starting Shairport %s\n", version);
-
-    ESP_ERROR_CHECK(nvs_flash_init());
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-
-    ESP_ERROR_CHECK(example_connect());
 
     memset(&config, 0, sizeof(config));
 
@@ -93,6 +81,9 @@ void app_main(void) {
     esp_rom_md5_update(&ctx, config.apname, strlen(config.apname));
     esp_rom_md5_final(ap_md5, &ctx);
     memcpy(config.hw_addr, ap_md5, sizeof(config.hw_addr));
+
+    config.output = &audio_dummy;
+    config.output->init(0, NULL);
 
     rtsp_listen_loop();
 

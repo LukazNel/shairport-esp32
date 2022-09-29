@@ -35,7 +35,9 @@
 #include <unistd.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <pthread.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/semphr.h>
 #include "esp_rom_md5.h"
 
 #include "common.h"
@@ -49,75 +51,16 @@
 #define INETx_ADDRSTRLEN INET_ADDRSTRLEN
 #endif
 
-// only one thread is allowed to use the player at once.
-// it monitors the request variable (at least when interrupted)
-static pthread_mutex_t playing_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int please_shutdown = 0;
-static pthread_t playing_thread;
+static TaskHandle_t playing_thread;
 
 typedef struct {
     int fd;
     stream_cfg stream;
     SOCKADDR remote;
     int running;
-    pthread_t thread;
+    TaskHandle_t thread;
 } rtsp_conn_info;
-
-// determine if we are the currently playing thread
-static inline int rtsp_playing(void) {
-    if (pthread_mutex_trylock(&playing_mutex)) {
-        return pthread_equal(playing_thread, pthread_self());
-    } else {
-        pthread_mutex_unlock(&playing_mutex);
-        return 0;
-    }
-}
-
-static void rtsp_take_player(void) {
-    if (rtsp_playing())
-        return;
-
-    if (pthread_mutex_trylock(&playing_mutex)) {
-        debug(1, "shutting down playing thread\n");
-        // XXX minor race condition between please_shutdown and signal delivery
-        please_shutdown = 1;
-        //pthread_kill(playing_thread, SIGUSR1);
-        pthread_mutex_lock(&playing_mutex);
-    }
-    playing_thread = pthread_self();
-}
-
-void rtsp_shutdown_stream(void) {
-    rtsp_take_player();
-    pthread_mutex_unlock(&playing_mutex);
-}
-
-// keep track of the threads we have spawned so we can join() them
-static rtsp_conn_info **conns = NULL;
-static int nconns = 0;
-static void track_thread(rtsp_conn_info *conn) {
-    conns = realloc(conns, sizeof(rtsp_conn_info*) * (nconns + 1));
-    conns[nconns] = conn;
-    nconns++;
-}
-
-static void cleanup_threads(void) {
-    void *retval;
-    int i;
-    debug(2, "culling threads.\n");
-    for (i=0; i<nconns; ) {
-        if (conns[i]->running == 0) {
-            pthread_join(conns[i]->thread, &retval);
-            free(conns[i]);
-            debug(2, "one joined\n");
-            nconns--;
-            if (nconns)
-                conns[i] = conns[nconns];
-        } else {
-            i++;
-        }
-    }
-}
 
 // park a null at the line ending, and return the next line pointer
 // accept \r, \n, or \r\n
@@ -367,8 +310,6 @@ static void handle_options(rtsp_conn_info *conn,
 
 static void handle_teardown(rtsp_conn_info *conn,
                             rtsp_message *req, rtsp_message *resp) {
-    if (!rtsp_playing())
-        return;
     resp->respcode = 200;
     msg_add_header(resp, "Connection", "close");
     please_shutdown = 1;
@@ -376,8 +317,6 @@ static void handle_teardown(rtsp_conn_info *conn,
 
 static void handle_flush(rtsp_conn_info *conn,
                          rtsp_message *req, rtsp_message *resp) {
-    if (!rtsp_playing())
-        return;
     player_flush();
     resp->respcode = 200;
 }
@@ -402,7 +341,6 @@ static void handle_setup(rtsp_conn_info *conn,
     p = strchr(p, '=') + 1;
     tport = atoi(p);
 
-    rtsp_take_player();
     int sport = rtp_setup(&conn->remote, cport, tport);
     if (!sport)
         return;
@@ -701,13 +639,7 @@ authenticate:
     return 1;
 }
 
-static void *rtsp_conversation_thread_func(void *pconn) {
-    // SIGUSR1 is used to interrupt this thread if blocked for read
-    sigset_t set;
-    sigemptyset(&set);
-    sigaddset(&set, SIGUSR1);
-    pthread_sigmask(SIG_UNBLOCK, &set, NULL);
-
+static void rtsp_conversation_thread_func(void *pconn) {
     rtsp_conn_info *conn = pconn;
 
     rtsp_message *req, *resp;
@@ -740,19 +672,18 @@ respond:
     }
 
     debug(1, "closing RTSP connection\n");
-    if (conn->fd > 0)
+    if (conn->fd > 0) {
         close(conn->fd);
-    if (rtsp_playing()) {
-        rtp_shutdown();
-        player_stop();
-        please_shutdown = 0;
-        pthread_mutex_unlock(&playing_mutex);
     }
+    rtp_shutdown();
+    player_stop();
+    please_shutdown = 0;
     if (auth_nonce)
         free(auth_nonce);
     conn->running = 0;
     debug(2, "terminating RTSP thread\n");
-    return NULL;
+
+    vTaskDelete(playing_thread);
 }
 
 // this function is not thread safe.
@@ -857,8 +788,6 @@ void rtsp_listen_loop(void) {
             break;
         }
 
-        cleanup_threads();
-
         acceptfd = -1;
         for (i=0; i<nsock; i++) {
             if (FD_ISSET(sockfd[i], &fds)) {
@@ -879,14 +808,10 @@ void rtsp_listen_loop(void) {
             perror("failed to accept connection");
             free(conn);
         } else {
-            pthread_t rtsp_conversation_thread;
-            ret = pthread_create(&rtsp_conversation_thread, NULL, rtsp_conversation_thread_func, conn);
-            if (ret)
-                die("Failed to create RTSP receiver thread!");
+            xTaskCreate(rtsp_conversation_thread_func, "RTSP Conversation", 4096, (void*)conn, 2, playing_thread);
 
-            conn->thread = rtsp_conversation_thread;
+            conn->thread = playing_thread;
             conn->running = 1;
-            track_thread(conn);
         }
     }
     perror("select");

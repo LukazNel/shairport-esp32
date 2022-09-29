@@ -24,8 +24,8 @@
  * OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#include <pthread.h>
-#include <signal.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include <unistd.h>
 #include <memory.h>
 #include <sys/types.h>
@@ -41,9 +41,9 @@ static int please_shutdown;
 
 static SOCKADDR rtp_client;
 static int sock;
-static pthread_t rtp_thread;
+static TaskHandle_t rtp_thread;
 
-static void *rtp_receiver(void *arg) {
+static void rtp_receiver(void* arg) {
     // we inherit the signal mask (SIGUSR1)
     uint8_t packet[2048], *pktp;
 
@@ -88,7 +88,7 @@ static void *rtp_receiver(void *arg) {
     debug(1, "RTP thread interrupted. terminating.\n");
     close(sock);
 
-    return NULL;
+    vTaskDelete(rtp_thread);
 }
 
 static int bind_port(SOCKADDR *remote) {
@@ -157,7 +157,7 @@ int rtp_setup(SOCKADDR *remote, int cport, int tport) {
     debug(1, "rtp listening on port %d\n", sport);
 
     please_shutdown = 0;
-    pthread_create(&rtp_thread, NULL, &rtp_receiver, NULL);
+    xTaskCreate(rtp_receiver, "RTP Receiver", 5120, NULL, 4, &rtp_thread);
 
     running = 1;
     return sport;
@@ -169,9 +169,7 @@ void rtp_shutdown(void) {
 
     debug(2, "shutting down RTP thread\n");
     please_shutdown = 1;
-    //pthread_kill(rtp_thread, SIGUSR1);
-    void *retval;
-    pthread_join(rtp_thread, &retval);
+    vTaskDelete(rtp_thread);
     running = 0;
 }
 
