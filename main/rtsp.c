@@ -45,6 +45,11 @@
 #include "rtp.h"
 #include "shairport_mdns.h"
 
+#define LOG_LOCAL_LEVEL 4
+#include "esp_log.h"
+
+static const char TAG[] = "RTSP";
+
 #ifdef AF_INET6
 #define INETx_ADDRSTRLEN INET6_ADDRSTRLEN
 #else
@@ -52,7 +57,7 @@
 #endif
 
 static int please_shutdown = 0;
-static TaskHandle_t playing_thread;
+TaskHandle_t* listen_thread;
 
 typedef struct {
     int fd;
@@ -61,6 +66,32 @@ typedef struct {
     int running;
     TaskHandle_t thread;
 } rtsp_conn_info;
+
+// keep track of the threads we have spawned so we can join() them
+static rtsp_conn_info **conns = NULL;
+static int nconns = 0;
+static void track_thread(rtsp_conn_info *conn) {
+    conns = realloc(conns, sizeof(rtsp_conn_info*) * (nconns + 1));
+    conns[nconns] = conn;
+    nconns++;
+}
+
+static void cleanup_threads(void) {
+    int i;
+    ESP_LOGD(TAG, "culling threads.\n");
+    for (i=0; i<nconns; ) {
+        if (conns[i]->thread == NULL) { //conns[i]->running == 0) {
+            //vTaskDelete(conns[i]->thread);
+            free(conns[i]);
+            ESP_LOGD(TAG, "one joined\n");
+            nconns--;
+            if (nconns)
+                conns[i] = conns[nconns];
+        } else {
+            i++;
+        }
+    }
+}
 
 // park a null at the line ending, and return the next line pointer
 // accept \r, \n, or \r\n
@@ -108,7 +139,7 @@ static rtsp_message * msg_init(void) {
 
 static int msg_add_header(rtsp_message *msg, char *name, char *value) {
     if (msg->nheaders >= sizeof(msg->name)/sizeof(char*)) {
-        warn("too many headers?!");
+        ESP_LOGW(TAG, "too many headers?!");
         return 1;
     }
 
@@ -147,7 +178,7 @@ static int msg_handle_line(rtsp_message **pmsg, char *line) {
         *pmsg = msg;
         char *sp, *p;
 
-        debug(1, "received request: %s\n", line);
+        ESP_LOGD(TAG, "received request: %s\n", line);
 
         p = strtok_r(line, " ", &sp);
         if (!p)
@@ -171,13 +202,13 @@ static int msg_handle_line(rtsp_message **pmsg, char *line) {
         char *p;
         p = strstr(line, ": ");
         if (!p) {
-            warn("bad header: >>%s<<", line);
+            ESP_LOGW(TAG, "bad header: >>%s<<", line);
             goto fail;
         }
         *p = 0;
         p += 2;
         msg_add_header(msg, line, p);
-        debug(2, "    %s: %s\n", line, p);
+        ESP_LOGD(TAG, "    %s: %s\n", line, p);
         return -1;
     } else {
         char *cl = msg_get_header(msg, "Content-Length");
@@ -204,13 +235,13 @@ static rtsp_message * rtsp_read_request(int fd) {
     int msg_size = -1;
 
     while (msg_size < 0) {
-        if (please_shutdown) {
-            debug(1, "RTSP shutdown requested\n");
+        if (ulTaskNotifyTake(pdTRUE, 0)) {
+            ESP_LOGD(TAG, "RTSP shutdown requested\n");
             goto shutdown;
         }
         nread = read(fd, buf+inbuf, buflen - inbuf);
         if (!nread) {
-            debug(1, "RTSP connection closed\n");
+            ESP_LOGD(TAG, "RTSP connection closed\n");
             goto shutdown;
         }
         if (nread < 0) {
@@ -226,7 +257,7 @@ static rtsp_message * rtsp_read_request(int fd) {
             msg_size = msg_handle_line(&msg, buf);
 
             if (!msg) {
-                warn("no RTSP header received");
+                ESP_LOGW(TAG, "no RTSP header received");
                 goto shutdown;
             }
 
@@ -239,7 +270,7 @@ static rtsp_message * rtsp_read_request(int fd) {
     if (msg_size > buflen) {
         buf = realloc(buf, msg_size);
         if (!buf) {
-            warn("too much content");
+            ESP_LOGW(TAG, "too much content");
             goto shutdown;
         }
         buflen = msg_size;
@@ -279,21 +310,21 @@ static void msg_write_response(int fd, rtsp_message *resp) {
     n = snprintf(p, pktfree,
                  "RTSP/1.0 %d %s\r\n", resp->respcode,
                  resp->respcode==200 ? "OK" : "Error");
-    debug(1, "sending response: %s", pkt);
+    ESP_LOGD(TAG, "sending response: %s", pkt);
     pktfree -= n;
     p += n;
 
     for (i=0; i<resp->nheaders; i++) {
-        debug(2, "    %s: %s\n", resp->name[i], resp->value[i]);
+        ESP_LOGD(TAG, "    %s: %s\n", resp->name[i], resp->value[i]);
         n = snprintf(p, pktfree, "%s: %s\r\n", resp->name[i], resp->value[i]);
         pktfree -= n;
         p += n;
         if (pktfree <= 0)
-            die("Attempted to write overlong RTSP packet");
+            ESP_LOGE(TAG, "Attempted to write overlong RTSP packet");
     }
 
     if (pktfree < 3)
-        die("Attempted to write overlong RTSP packet");
+        ESP_LOGE(TAG, "Attempted to write overlong RTSP packet");
 
     strcpy(p, "\r\n");
     write_unchecked(fd, pkt, p-pkt+2);
@@ -323,6 +354,7 @@ static void handle_flush(rtsp_conn_info *conn,
 
 static void handle_setup(rtsp_conn_info *conn,
                          rtsp_message *req, rtsp_message *resp) {
+
     int cport, tport;
     char *hdr = msg_get_header(req, "Transport");
     if (!hdr)
@@ -374,13 +406,13 @@ static void handle_set_parameter_parameter(rtsp_conn_info *conn,
 
         if (!strncmp(cp, "volume: ", 8)) {
             float volume = atof(cp + 8);
-            debug(1, "volume: %f\n", volume);
+            ESP_LOGD(TAG, "volume: %f\n", volume);
             player_volume(volume);
         } else if(!strncmp(cp, "progress: ", 10)) {
             char *progress = cp + 10;
-            debug(1, "progress: %s\n", progress);
+            ESP_LOGD(TAG, "progress: %s\n", progress);
         } else {
-            debug(1, "unrecognised parameter: >>%s<< (%d)\n", cp, strlen(cp));
+            ESP_LOGD(TAG, "unrecognised parameter: >>%s<< (%d)\n", cp, strlen(cp));
         }
         cp = next;
     }
@@ -389,22 +421,22 @@ static void handle_set_parameter_parameter(rtsp_conn_info *conn,
 static void handle_set_parameter(rtsp_conn_info *conn,
                                  rtsp_message *req, rtsp_message *resp) {
     if (!req->contentlength)
-        debug(1, "received empty SET_PARAMETER request\n");
+        ESP_LOGD(TAG, "received empty SET_PARAMETER request\n");
 
     char *ct = msg_get_header(req, "Content-Type");
 
     if (ct) {
-        debug(2, "SET_PARAMETER Content-Type: %s\n", ct);
+        ESP_LOGD(TAG, "SET_PARAMETER Content-Type: %s\n", ct);
 
          if (!strncmp(ct, "text/parameters", 15)) {
-            debug(1, "received parameters in SET_PARAMETER request\n");
+            ESP_LOGD(TAG, "received parameters in SET_PARAMETER request\n");
 
             handle_set_parameter_parameter(conn, req, resp);
         } else {
-            debug(1, "received unknown Content-Type %s in SET_PARAMETER request\n", ct);
+            ESP_LOGD(TAG, "received unknown Content-Type %s in SET_PARAMETER request\n", ct);
         }
     } else {
-        debug(1, "missing Content-Type header in SET_PARAMETER request\n");
+        ESP_LOGD(TAG, "missing Content-Type header in SET_PARAMETER request\n");
     }
 
     resp->respcode = 200;
@@ -436,14 +468,14 @@ static void handle_announce(rtsp_conn_info *conn,
     }
 
     if (!paesiv || !prsaaeskey || !pfmtp) {
-        warn("required params missing from announce");
+        ESP_LOGW(TAG, "required params missing from announce");
         return;
     }
 
     int len, keylen;
     uint8_t *aesiv = base64_dec(paesiv, &len);
     if (len != 16) {
-        warn("client announced aeskey of %d bytes, wanted 16", len);
+        ESP_LOGW(TAG, "client announced aeskey of %d bytes, wanted 16", len);
         free(aesiv);
         return;
     }
@@ -454,7 +486,7 @@ static void handle_announce(rtsp_conn_info *conn,
     uint8_t *aeskey = rsa_apply(rsaaeskey, len, &keylen, RSA_MODE_KEY);
     free(rsaaeskey);
     if (keylen != 16) {
-        warn("client announced rsaaeskey of %d bytes, wanted 16", keylen);
+        ESP_LOGW(TAG, "client announced rsaaeskey of %d bytes, wanted 16", keylen);
         free(aeskey);
         return;
     }
@@ -501,7 +533,7 @@ static void apple_challenge(int fd, rtsp_message *req, rtsp_message *resp) {
     memset(buf, 0, sizeof(buf));
 
     if (chall_len > 16) {
-        warn("oversized Apple-Challenge!");
+        ESP_LOGW(TAG, "oversized Apple-Challenge!");
         free(chall);
         return;
     }
@@ -545,98 +577,93 @@ static void apple_challenge(int fd, rtsp_message *req, rtsp_message *resp) {
 
 static char *make_nonce(void) {
     uint8_t random[8];
-    int fd = open("/dev/random", O_RDONLY);
-    if (fd < 0)
-        die("could not open /dev/random!");
-    read_unchecked(fd, random, sizeof(random));
-    close(fd);
+    esp_fill_random(random, 8);
     return base64_enc(random, 8);
 }
 
 static int rtsp_auth(char **nonce, rtsp_message *req, rtsp_message *resp) {
 
-    if (!config.password)
-        return 0;
-    if (!*nonce) {
-        *nonce = make_nonce();
-        goto authenticate;
-    }
-
-    char *hdr = msg_get_header(req, "Authorization");
-    if (!hdr || strncmp(hdr, "Digest ", 7))
-        goto authenticate;
-
-    char *realm = strstr(hdr, "realm=\"");
-    char *username = strstr(hdr, "username=\"");
-    char *response = strstr(hdr, "response=\"");
-    char *uri = strstr(hdr, "uri=\"");
-
-    if (!realm || !username || !response || !uri)
-        goto authenticate;
-
-    char *quote;
-    realm = strchr(realm, '"') + 1;
-    if (!(quote = strchr(realm, '"')))
-        goto authenticate;
-    *quote = 0;
-    username = strchr(username, '"') + 1;
-    if (!(quote = strchr(username, '"')))
-        goto authenticate;
-    *quote = 0;
-    response = strchr(response, '"') + 1;
-    if (!(quote = strchr(response, '"')))
-        goto authenticate;
-    *quote = 0;
-    uri = strchr(uri, '"') + 1;
-    if (!(quote = strchr(uri, '"')))
-        goto authenticate;
-    *quote = 0;
-
-    uint8_t digest_urp[16], digest_mu[16], digest_total[16];
-    md5_context_t ctx;
-    esp_rom_md5_init(&ctx);
-    esp_rom_md5_update(&ctx, username, strlen(username));
-    esp_rom_md5_update(&ctx, ":", 1);
-    esp_rom_md5_update(&ctx, realm, strlen(realm));
-    esp_rom_md5_update(&ctx, ":", 1);
-    esp_rom_md5_update(&ctx, config.password, strlen(config.password));
-    esp_rom_md5_final(digest_urp, &ctx);
-
-    esp_rom_md5_init(&ctx);
-    esp_rom_md5_update(&ctx, req->method, strlen(req->method));
-    esp_rom_md5_update(&ctx, ":", 1);
-    esp_rom_md5_update(&ctx, uri, strlen(uri));
-    esp_rom_md5_final(digest_mu, &ctx);
-
-    int i;
-    char buf[33];
-    for (i=0; i<16; i++)
-        sprintf(buf + 2*i, "%02x", digest_urp[i]);
-    esp_rom_md5_init(&ctx);
-    esp_rom_md5_update(&ctx, buf, 32);
-    esp_rom_md5_update(&ctx, ":", 1);
-    esp_rom_md5_update(&ctx, *nonce, strlen(*nonce));
-    esp_rom_md5_update(&ctx, ":", 1);
-    for (i=0; i<16; i++)
-        sprintf(buf + 2*i, "%02x", digest_mu[i]);
-    esp_rom_md5_update(&ctx, buf, 32);
-    esp_rom_md5_final(digest_total, &ctx);
-
-    for (i=0; i<16; i++)
-        sprintf(buf + 2*i, "%02x", digest_total[i]);
-
-    if (!strcmp(response, buf))
-        return 0;
-    warn("auth failed");
-
-authenticate:
-    resp->respcode = 401;
-    int hdrlen = strlen(*nonce) + 40;
-    char *authhdr = malloc(hdrlen);
-    snprintf(authhdr, hdrlen, "Digest realm=\"taco\", nonce=\"%s\"", *nonce);
-    msg_add_header(resp, "WWW-Authenticate", authhdr);
-    free(authhdr);
-    return 1;
+    return 0;
+//    if (!*nonce) {
+//        *nonce = make_nonce();
+//        goto authenticate;
+//    }
+//
+//    char *hdr = msg_get_header(req, "Authorization");
+//    if (!hdr || strncmp(hdr, "Digest ", 7))
+//        goto authenticate;
+//
+//    char *realm = strstr(hdr, "realm=\"");
+//    char *username = strstr(hdr, "username=\"");
+//    char *response = strstr(hdr, "response=\"");
+//    char *uri = strstr(hdr, "uri=\"");
+//
+//    if (!realm || !username || !response || !uri)
+//        goto authenticate;
+//
+//    char *quote;
+//    realm = strchr(realm, '"') + 1;
+//    if (!(quote = strchr(realm, '"')))
+//        goto authenticate;
+//    *quote = 0;
+//    username = strchr(username, '"') + 1;
+//    if (!(quote = strchr(username, '"')))
+//        goto authenticate;
+//    *quote = 0;
+//    response = strchr(response, '"') + 1;
+//    if (!(quote = strchr(response, '"')))
+//        goto authenticate;
+//    *quote = 0;
+//    uri = strchr(uri, '"') + 1;
+//    if (!(quote = strchr(uri, '"')))
+//        goto authenticate;
+//    *quote = 0;
+//
+//    uint8_t digest_urp[16], digest_mu[16], digest_total[16];
+//    md5_context_t ctx;
+//    esp_rom_md5_init(&ctx);
+//    esp_rom_md5_update(&ctx, username, strlen(username));
+//    esp_rom_md5_update(&ctx, ":", 1);
+//    esp_rom_md5_update(&ctx, realm, strlen(realm));
+//    esp_rom_md5_update(&ctx, ":", 1);
+//    //esp_rom_md5_update(&ctx, config.password, strlen(config.password));
+//    esp_rom_md5_final(digest_urp, &ctx);
+//
+//    esp_rom_md5_init(&ctx);
+//    esp_rom_md5_update(&ctx, req->method, strlen(req->method));
+//    esp_rom_md5_update(&ctx, ":", 1);
+//    esp_rom_md5_update(&ctx, uri, strlen(uri));
+//    esp_rom_md5_final(digest_mu, &ctx);
+//
+//    int i;
+//    char buf[33];
+//    for (i=0; i<16; i++)
+//        sprintf(buf + 2*i, "%02x", digest_urp[i]);
+//    esp_rom_md5_init(&ctx);
+//    esp_rom_md5_update(&ctx, buf, 32);
+//    esp_rom_md5_update(&ctx, ":", 1);
+//    esp_rom_md5_update(&ctx, *nonce, strlen(*nonce));
+//    esp_rom_md5_update(&ctx, ":", 1);
+//    for (i=0; i<16; i++)
+//        sprintf(buf + 2*i, "%02x", digest_mu[i]);
+//    esp_rom_md5_update(&ctx, buf, 32);
+//    esp_rom_md5_final(digest_total, &ctx);
+//
+//    for (i=0; i<16; i++)
+//        sprintf(buf + 2*i, "%02x", digest_total[i]);
+//
+//    if (!strcmp(response, buf))
+//        return 0;
+//    ESP_LOGW(TAG, "auth failed");
+//
+//authenticate:
+//    resp->respcode = 401;
+//    int hdrlen = strlen(*nonce) + 40;
+//    char *authhdr = malloc(hdrlen);
+//    snprintf(authhdr, hdrlen, "Digest realm=\"taco\", nonce=\"%s\"", *nonce);
+//    msg_add_header(resp, "WWW-Authenticate", authhdr);
+//    free(authhdr);
+//    return 1;
 }
 
 static void rtsp_conversation_thread_func(void *pconn) {
@@ -665,25 +692,24 @@ static void rtsp_conversation_thread_func(void *pconn) {
             }
         }
 
+
 respond:
         msg_write_response(conn->fd, resp);
         msg_free(req);
         msg_free(resp);
     }
 
-    debug(1, "closing RTSP connection\n");
+    ESP_LOGD(TAG, "closing RTSP connection\n");
     if (conn->fd > 0) {
         close(conn->fd);
     }
     rtp_shutdown();
     player_stop();
-    please_shutdown = 0;
     if (auth_nonce)
         free(auth_nonce);
+    ESP_LOGD(TAG, "terminating RTSP thread\n");
     conn->running = 0;
-    debug(2, "terminating RTSP thread\n");
-
-    vTaskDelete(playing_thread);
+    vTaskDelete(NULL);
 }
 
 // this function is not thread safe.
@@ -704,6 +730,7 @@ static const char* format_address(struct sockaddr *fsa) {
 }
 
 void rtsp_listen_loop(void) {
+    esp_log_level_set(TAG, ESP_LOG_DEBUG);
     struct addrinfo hints, *info, *p;
     char portstr[6];
     int *sockfd = NULL;
@@ -719,7 +746,7 @@ void rtsp_listen_loop(void) {
 
     ret = getaddrinfo(NULL, portstr, &hints, &info);
     if (ret) {
-        die("getaddrinfo failed: %d", ret);
+        ESP_LOGE(TAG, "getaddrinfo failed: %d", ret);
     }
 
     for (p=info; p; p=p->ai_next) {
@@ -742,10 +769,10 @@ void rtsp_listen_loop(void) {
         // one of the address families will fail on some systems that
         // report its availability. do not complain.
         if (ret) {
-            debug(1, "Failed to bind to address %s\n", format_address(p->ai_addr));
+            ESP_LOGD(TAG, "Failed to bind to address %s\n", format_address(p->ai_addr));
             continue;
         }
-        debug(1, "Bound to address %s\n", format_address(p->ai_addr));
+        ESP_LOGD(TAG, "Bound to address %s\n", format_address(p->ai_addr));
 
         listen(fd, 5);
         nsock++;
@@ -756,7 +783,7 @@ void rtsp_listen_loop(void) {
     freeaddrinfo(info);
 
     if (!nsock)
-        die("could not bind any listen sockets!");
+        ESP_LOGE(TAG, "could not bind any listen sockets!");
 
 
     int maxfd = -1;
@@ -770,11 +797,12 @@ void rtsp_listen_loop(void) {
     mdns_register();
 
     printf("Listening for connections.\n");
-    shairport_startup_complete();
+    ESP_LOGD(TAG, "Testing");
 
     int acceptfd;
     struct timeval tv;
     while (1) {
+
         tv.tv_sec = 300;
         tv.tv_usec = 0;
 
@@ -787,6 +815,9 @@ void rtsp_listen_loop(void) {
                 continue;
             break;
         }
+
+        ESP_LOGI(TAG, "Going");
+        cleanup_threads();
 
         acceptfd = -1;
         for (i=0; i<nsock; i++) {
@@ -802,18 +833,19 @@ void rtsp_listen_loop(void) {
         memset(conn, 0, sizeof(rtsp_conn_info));
         socklen_t slen = sizeof(conn->remote);
 
-        debug(1, "new RTSP connection\n");
+        ESP_LOGD(TAG, "new RTSP connection\n");
         conn->fd = accept(acceptfd, (struct sockaddr *)&conn->remote, &slen);
+
         if (conn->fd < 0) {
             perror("failed to accept connection");
             free(conn);
         } else {
-            xTaskCreate(rtsp_conversation_thread_func, "RTSP Conversation", 4096, (void*)conn, 2, playing_thread);
-
-            conn->thread = playing_thread;
+            xTaskCreate(rtsp_conversation_thread_func, "RTSP Conversation", 4096, (void*)conn, 2, &(conn->thread));
+            listen_thread = &(conn->thread);
             conn->running = 1;
+            track_thread(conn);
         }
     }
     perror("select");
-    die("fell out of the RTSP select loop");
+    ESP_LOGE(TAG, "fell out of the RTSP select loop");
 }

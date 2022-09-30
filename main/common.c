@@ -28,56 +28,16 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <memory.h>
-#include "mbedtls/base64.h"
+
+#include <mbedtls/base64.h>
 #include <mbedtls/pk.h>
-#include <mbedtls/error.h>
 #include <mbedtls/entropy.h>
 #include <mbedtls/ctr_drbg.h>
+
 #include "common.h"
 
 shairport_cfg config;
 
-int debuglev = 0;
-
-void die(char *format, ...) {
-    fprintf(stderr, "FATAL: ");
-
-    va_list args;
-    va_start(args, format);
-
-    vfprintf(stderr, format, args);
-
-    va_end(args);
-
-    fprintf(stderr, "\n");
-    shairport_shutdown(1);
-}
-
-void warn(char *format, ...) {
-    fprintf(stderr, "WARNING: ");
-    va_list args;
-    va_start(args, format);
-    vfprintf(stderr, format, args);
-    va_end(args);
-    fprintf(stderr, "\n");
-}
-
-void debug(int level, char *format, ...) {
-    //if (level > debuglev)
-    //    return;
-    va_list args;
-    va_start(args, format);
-    vfprintf(stderr, format, args);
-    va_end(args);
-}
-
-#define CONFIG_MDNS_HOSTNAME   "ESP-WROVER"
-#define CONFIG_MDNS_INSTANCE   "ESP with mDNS"
-
-char* generate_hostname(void)
-{
-    return strdup(CONFIG_MDNS_HOSTNAME);
-}
 char *base64_enc(uint8_t *input, int length) {
     int bufsize = length*4/3 + 5;
     unsigned char *buf = malloc(bufsize);
@@ -133,91 +93,29 @@ static const char super_secret_key[] =
 "2gG0N5hvJpzwwhbhXqFKA4zaaSrw622wDniAK5MlIE0tIAKKP4yxNGjoD2QYjhBGuhvkWKY=\n"
 "-----END RSA PRIVATE KEY-----";
 
-/**
- * Return a string representation of an mbedtls error code
- */
-static char* mbedtlsError(int errnum) {
-    static char buffer[200];
-    mbedtls_strerror(errnum, buffer, sizeof(buffer));
-    return buffer;
-} // mbedtlsError
-
 uint8_t *rsa_apply(uint8_t *input, int inlen, int *outlen, int mode) {
-    int ret = 0;
     mbedtls_pk_context pk;
+
     mbedtls_pk_init(&pk);
-
-    if ( (ret = mbedtls_pk_parse_key(&pk, (unsigned char*)super_secret_key, strlen(super_secret_key)+1,
-                                     NULL, 0)) != 0 ) {
-        die("mbedtls_pk_parse_key error %s\n", mbedtlsError(ret)); //-0x%04x\n", -ret);
-    }
-
-    mbedtls_entropy_context entropy;
-    mbedtls_ctr_drbg_context ctr_drbg;
-    mbedtls_ctr_drbg_init(&ctr_drbg);
-    mbedtls_entropy_init(&entropy);
-
-    const char* pers="MyEntropy";
-
-    mbedtls_ctr_drbg_seed(
-            &ctr_drbg,
-            mbedtls_entropy_func,
-            &entropy,
-            (const unsigned char*)pers,
-            strlen(pers));
-
+    mbedtls_pk_parse_key(&pk, (unsigned char*)super_secret_key, strlen(super_secret_key)+1,
+                         NULL, 0);
+    mbedtls_rsa_context* ctx = mbedtls_pk_rsa(pk);
     uint8_t *out = NULL;
-    mbedtls_rsa_context* ctx;
     switch (mode) {
         case RSA_MODE_AUTH:
-            out = malloc(256);
-            ret = mbedtls_rsa_pkcs1_encrypt(mbedtls_pk_rsa(pk), mbedtls_ctr_drbg_random, &ctr_drbg,
+            mbedtls_rsa_set_padding(ctx, MBEDTLS_RSA_PKCS_V15, MBEDTLS_MD_NONE);
+            out = malloc(ctx->len);
+            mbedtls_rsa_pkcs1_encrypt(ctx, NULL, NULL,
                 MBEDTLS_RSA_PRIVATE, inlen, input, out);
-            *outlen = 256;
+            *outlen = ctx->len;
             break;
         case RSA_MODE_KEY:
-            ctx = mbedtls_pk_rsa(pk);
             mbedtls_rsa_set_padding(ctx, MBEDTLS_RSA_PKCS_V21, MBEDTLS_MD_SHA1);
-            out = malloc(16);
-            ret = mbedtls_rsa_pkcs1_decrypt(ctx, mbedtls_ctr_drbg_random, &ctr_drbg,
-             MBEDTLS_RSA_PRIVATE, (size_t*)outlen, input, out, 16);
-            break;
-        default:
-            die("bad rsa mode");
+            out = malloc(ctx->len);
+            mbedtls_rsa_pkcs1_decrypt(ctx, NULL, NULL,
+             MBEDTLS_RSA_PRIVATE, (size_t*)outlen, input, out, ctx->len);
+            // break;
     }
-    if (ret != 0)
-        die("rsa_apply mode %d error: %s\n", mode, mbedtlsError(ret));
-
-    mbedtls_ctr_drbg_free(&ctr_drbg);
-    mbedtls_entropy_free(&entropy);
     mbedtls_pk_free(&pk);
     return out;
-}
-
-void command_start(void) {
-    if (!config.cmd_start)
-        return;
-    if (!config.cmd_blocking)
-        return;
-
-    debug(1, "running start command: %s", config.cmd_start);
-    if (system(config.cmd_start))
-        warn("exec of external start command failed");
-
-    if (!config.cmd_blocking)
-        exit(0);
-}
-
-void command_stop(void) {
-    if (!config.cmd_stop)
-        return;
-    if (!config.cmd_blocking)
-        return;
-
-    debug(1, "running stop command: %s", config.cmd_stop);
-    if (system(config.cmd_stop))
-        warn("exec of external stop command failed");
-
-    if (!config.cmd_blocking)
-        exit(0);
 }

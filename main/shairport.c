@@ -33,27 +33,12 @@
 
 static const char *version = "Version 1.0";
 
-
-static int shutting_down = 0;
-
 void shairport_shutdown(int retval) {
-    if (shutting_down)
-        return;
-    shutting_down = 1;
     printf("Shutting down...\n");
     mdns_unregister();
     //rtsp_shutdown_stream();
     if (config.output)
         config.output->deinit();
-    //daemon_exit(); // This does nothing if not in daemon mode
-}
-
-// forked daemon lets the spawner know it's up and running OK
-// should be called only once!
-void shairport_startup_complete(void) {
-    if (config.daemonise) {
-        //daemon_ready();
-    }
 }
 
 extern audio_output audio_dummy;
@@ -66,19 +51,13 @@ void start_shairport(void* args) {
     // set defaults
     config.buffer_start_fill = 220;
     config.port = 5002;
-    char* hostname = generate_hostname();
-    config.apname = malloc(20 + strlen(hostname));
-    snprintf(config.apname, 20 + 100, "Shairport on %s", hostname);
-    free(hostname);
 
     // mDNS supports maximum of 63-character names (we append 13).
-    if (strlen(config.apname) > 50)
-        die("Supplied name too long (max 50 characters)");
 
     uint8_t ap_md5[16];
     md5_context_t ctx;
     esp_rom_md5_init(&ctx);
-    esp_rom_md5_update(&ctx, config.apname, strlen(config.apname));
+    esp_rom_md5_update(&ctx, hostname, strlen(hostname));
     esp_rom_md5_final(ap_md5, &ctx);
     memcpy(config.hw_addr, ap_md5, sizeof(config.hw_addr));
 

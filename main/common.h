@@ -18,27 +18,16 @@
 
 
 typedef struct {
-    char *password;
-    char *apname;
+//    char *apname;
     uint8_t hw_addr[6];
     int port;
-    char *output_name;
+//    char *output_name;
     audio_output *output;
-    char *mdns_name;
+//    char *mdns_name;
     int buffer_start_fill;
-    int daemonise;
-    char *cmd_start, *cmd_stop;
-    int cmd_blocking;
-    char *meta_dir;
-    char *pidfile;
-    char *logfile;
-    char *errfile;
+//    char *cmd_start, *cmd_stop;
+//    int cmd_blocking;
 } shairport_cfg;
-
-extern int debuglev;
-void die(char *format, ...);
-void warn(char *format, ...);
-void debug(int level, char *format, ...);
 
 /* functions that ignore return values without compiler warnings.
  * for use only where return values really don't matter!
@@ -47,8 +36,6 @@ void debug(int level, char *format, ...);
 #define read_unchecked(...)  (void)(read (__VA_ARGS__)+1)
 #define lockf_unchecked(...) (void)(lockf(__VA_ARGS__)+1)
 
-char* generate_hostname(void);
-
 uint8_t *base64_dec(char *input, int *outlen);
 char *base64_enc(uint8_t *input, int length);
 
@@ -56,12 +43,9 @@ char *base64_enc(uint8_t *input, int length);
 #define RSA_MODE_KEY  (1)
 uint8_t *rsa_apply(uint8_t *input, int inlen, int *outlen, int mode);
 
-void command_start(void);
-void command_stop(void);
-
 extern shairport_cfg config;
+extern char* hostname;
 
 void shairport_shutdown(int retval);
-void shairport_startup_complete(void);
 
 #endif // _COMMON_H

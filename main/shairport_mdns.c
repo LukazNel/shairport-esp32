@@ -32,7 +32,7 @@
 #include "mdns.h"
 
 void mdns_register(void) {
-    char *mdns_apname = malloc(strlen(config.apname) + 14);
+    char *mdns_apname = malloc(strlen(hostname) + 14);
     char *p = mdns_apname;
     int i;
     for (i=0; i<6; i++) {
@@ -40,19 +40,7 @@ void mdns_register(void) {
         p += 2;
     }
     *p++ = '@';
-    strcpy(p, config.apname);
-
-    char * hostname = generate_hostname();
-
-    //initialize mDNS
-    ESP_ERROR_CHECK( mdns_init() );
-    //set mDNS hostname (required if you want to advertise services)
-    ESP_ERROR_CHECK( mdns_hostname_set(hostname) );
-    ESP_LOGI("TEST", "mdns hostname set to: [%s]", hostname);
-    //set default mDNS instance name
-    ESP_ERROR_CHECK( mdns_instance_name_set(EXAMPLE_MDNS_INSTANCE) );
-
-    free(hostname);
+    strcpy(p, hostname);
 
     mdns_txt_item_t txt[] = {
             {"tp", "UDP"},
@@ -74,6 +62,6 @@ void mdns_register(void) {
 }
 
 void mdns_unregister(void) {
-
+    ESP_ERROR_CHECK( mdns_service_remove("_raop", "_tcp") );
 }
 

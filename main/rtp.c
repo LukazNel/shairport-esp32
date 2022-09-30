@@ -34,14 +34,18 @@
 #include <netdb.h>
 #include "common.h"
 #include "player.h"
+#include "esp_log.h"
+
+static const char* TAG = "RTP";
 
 // only one RTP session can be active at a time.
-static int running = 0;
-static int please_shutdown;
+
 
 static SOCKADDR rtp_client;
 static int sock;
+
 static TaskHandle_t rtp_thread;
+extern TaskHandle_t* listen_thread;
 
 static void rtp_receiver(void* arg) {
     // we inherit the signal mask (SIGUSR1)
@@ -49,7 +53,7 @@ static void rtp_receiver(void* arg) {
 
     ssize_t nread;
     while (1) {
-        if (please_shutdown)
+        if (ulTaskNotifyTake(pdTRUE, 0))
             break;
         nread = recv(sock, packet, sizeof(packet), 0);
         if (nread < 0)
@@ -76,19 +80,20 @@ static void rtp_receiver(void* arg) {
                 continue;
             }
             if (type == 0x56 && seqno == 0) {
-                debug(2, "resend-related request packet received, ignoring.\n");
+                ESP_LOGD(TAG, "resend-related request packet received, ignoring.\n");
                 continue;
             }
-            debug(1, "Unknown RTP packet of type 0x%02X length %d seqno %d\n", type, nread, seqno);
+            ESP_LOGD(TAG, "Unknown RTP packet of type 0x%02X length %d seqno %d\n", type, nread, seqno);
             continue;
         }
-        warn("Unknown RTP packet of type 0x%02X length %d", type, nread);
+        ESP_LOGW(TAG, "Unknown RTP packet of type 0x%02X length %d", type, nread);
     }
 
-    debug(1, "RTP thread interrupted. terminating.\n");
+    ESP_LOGD(TAG, "RTP thread interrupted. terminating.\n");
     close(sock);
-
-    vTaskDelete(rtp_thread);
+    rtp_thread = NULL;
+    xTaskNotifyGive(*listen_thread);
+    vTaskDelete(NULL);
 }
 
 static int bind_port(SOCKADDR *remote) {
@@ -102,7 +107,7 @@ static int bind_port(SOCKADDR *remote) {
     int ret = getaddrinfo(NULL, "0", &hints, &info);
 
     //if (ret < 0)
-    //    die("failed to get usable addrinfo?! %s", gai_strerror(ret));
+    //    ESP_LOGE(TAG, "failed to get usable addrinfo?! %s", gai_strerror(ret));
 
     sock = socket(remote->SAFAMILY, SOCK_DGRAM, IPPROTO_UDP);
     ret = bind(sock, info->ai_addr, info->ai_addrlen);
@@ -110,7 +115,7 @@ static int bind_port(SOCKADDR *remote) {
     freeaddrinfo(info);
 
     if (ret < 0)
-        die("could not bind a UDP port!");
+        ESP_LOGE(TAG, "could not bind a UDP port!");
 
     int sport;
     SOCKADDR local;
@@ -132,10 +137,12 @@ static int bind_port(SOCKADDR *remote) {
 
 
 int rtp_setup(SOCKADDR *remote, int cport, int tport) {
-    if (running)
-        die("rtp_setup called with active stream!");
-
-    debug(1, "rtp_setup: cport=%d tport=%d\n", cport, tport);
+    if (rtp_thread != NULL) {
+        xTaskNotifyGive(rtp_thread);
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        assert(rtp_thread == NULL);
+    }
+    ESP_LOGD(TAG, "rtp_setup: cport=%d tport=%d\n", cport, tport);
 
     // we do our own timing and ignore the timing port.
     // an audio perfectionist may wish to learn the protocol.
@@ -154,30 +161,29 @@ int rtp_setup(SOCKADDR *remote, int cport, int tport) {
 
     int sport = bind_port(remote);
 
-    debug(1, "rtp listening on port %d\n", sport);
+    ESP_LOGD(TAG, "rtp listening on port %d\n", sport);
 
-    please_shutdown = 0;
     xTaskCreate(rtp_receiver, "RTP Receiver", 5120, NULL, 4, &rtp_thread);
 
-    running = 1;
     return sport;
 }
 
 void rtp_shutdown(void) {
-    if (!running)
-        die("rtp_shutdown called without active stream!");
-
-    debug(2, "shutting down RTP thread\n");
-    please_shutdown = 1;
-    vTaskDelete(rtp_thread);
-    running = 0;
+    //if (!running)
+    //    ESP_LOGE(TAG, "rtp_shutdown called without active stream!");
+    if (rtp_thread != NULL && *listen_thread == xTaskGetCurrentTaskHandle()) {
+        ESP_LOGD(TAG, "shutting down RTP thread\n");
+        xTaskNotifyGive(rtp_thread);
+        xTaskNotifyWait(0x01, 0x01, NULL, portMAX_DELAY);
+    }
 }
 
 void rtp_request_resend(seq_t first, seq_t last) {
-    if (!running)
-        die("rtp_request_resend called without active stream!");
+//    if (!running) {
+//        ESP_LOGE(TAG, "rtp_request_resend called without active stream!");
+//    }
 
-    debug(1, "requesting resend on %d packets (%04X:%04X)\n",
+    ESP_LOGD(TAG, "requesting resend on %d packets (%04X:%04X)\n",
          seq_diff(first,last) + 1, first, last);
 
     char req[8];    // *not* a standard RTCP NACK
