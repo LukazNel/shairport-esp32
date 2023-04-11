@@ -20,7 +20,9 @@ void start_shairport(void* args);
 char* hostname;
 
 void app_main(void) {
-
+    esp_log_level_set("RTSP", ESP_LOG_DEBUG);
+    esp_log_level_set("RTP", ESP_LOG_DEBUG);
+    esp_log_level_set("Player", ESP_LOG_DEBUG);
     hostname = strdup(CONFIG_MDNS_HOSTNAME);
 
     ESP_ERROR_CHECK(nvs_flash_init());

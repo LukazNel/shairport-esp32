@@ -45,10 +45,9 @@
 #include "rtp.h"
 #include "shairport_mdns.h"
 
-#define LOG_LOCAL_LEVEL 4
 #include "esp_log.h"
 
-static const char TAG[] = "RTSP";
+static const char* TAG = "RTSP";
 
 #ifdef AF_INET6
 #define INETx_ADDRSTRLEN INET6_ADDRSTRLEN
@@ -178,7 +177,7 @@ static int msg_handle_line(rtsp_message **pmsg, char *line) {
         *pmsg = msg;
         char *sp, *p;
 
-        ESP_LOGD(TAG, "received request: %s\n", line);
+        ESP_LOGV(TAG, "received request: %s\n", line);
 
         p = strtok_r(line, " ", &sp);
         if (!p)
@@ -208,7 +207,7 @@ static int msg_handle_line(rtsp_message **pmsg, char *line) {
         *p = 0;
         p += 2;
         msg_add_header(msg, line, p);
-        ESP_LOGD(TAG, "    %s: %s\n", line, p);
+        ESP_LOGV(TAG, "    %s: %s\n", line, p);
         return -1;
     } else {
         char *cl = msg_get_header(msg, "Content-Length");
@@ -310,12 +309,12 @@ static void msg_write_response(int fd, rtsp_message *resp) {
     n = snprintf(p, pktfree,
                  "RTSP/1.0 %d %s\r\n", resp->respcode,
                  resp->respcode==200 ? "OK" : "Error");
-    ESP_LOGD(TAG, "sending response: %s", pkt);
+    ESP_LOGV(TAG, "sending response: %s", pkt);
     pktfree -= n;
     p += n;
 
     for (i=0; i<resp->nheaders; i++) {
-        ESP_LOGD(TAG, "    %s: %s\n", resp->name[i], resp->value[i]);
+        ESP_LOGV(TAG, "    %s: %s\n", resp->name[i], resp->value[i]);
         n = snprintf(p, pktfree, "%s: %s\r\n", resp->name[i], resp->value[i]);
         pktfree -= n;
         p += n;
@@ -373,11 +372,10 @@ static void handle_setup(rtsp_conn_info *conn,
     p = strchr(p, '=') + 1;
     tport = atoi(p);
 
+    player_play(&conn->stream);
     int sport = rtp_setup(&conn->remote, cport, tport);
     if (!sport)
         return;
-
-    player_play(&conn->stream);
 
     char resphdr[100];
     snprintf(resphdr, sizeof(resphdr),
@@ -406,13 +404,13 @@ static void handle_set_parameter_parameter(rtsp_conn_info *conn,
 
         if (!strncmp(cp, "volume: ", 8)) {
             float volume = atof(cp + 8);
-            ESP_LOGD(TAG, "volume: %f\n", volume);
+            ESP_LOGV(TAG, "volume: %f\n", volume);
             player_volume(volume);
         } else if(!strncmp(cp, "progress: ", 10)) {
             char *progress = cp + 10;
-            ESP_LOGD(TAG, "progress: %s\n", progress);
+            ESP_LOGV(TAG, "progress: %s\n", progress);
         } else {
-            ESP_LOGD(TAG, "unrecognised parameter: >>%s<< (%d)\n", cp, strlen(cp));
+            ESP_LOGV(TAG, "unrecognised parameter: >>%s<< (%d)\n", cp, strlen(cp));
         }
         cp = next;
     }
@@ -421,22 +419,22 @@ static void handle_set_parameter_parameter(rtsp_conn_info *conn,
 static void handle_set_parameter(rtsp_conn_info *conn,
                                  rtsp_message *req, rtsp_message *resp) {
     if (!req->contentlength)
-        ESP_LOGD(TAG, "received empty SET_PARAMETER request\n");
+        ESP_LOGW(TAG, "received empty SET_PARAMETER request\n");
 
     char *ct = msg_get_header(req, "Content-Type");
 
     if (ct) {
-        ESP_LOGD(TAG, "SET_PARAMETER Content-Type: %s\n", ct);
+        ESP_LOGV(TAG, "SET_PARAMETER Content-Type: %s\n", ct);
 
          if (!strncmp(ct, "text/parameters", 15)) {
-            ESP_LOGD(TAG, "received parameters in SET_PARAMETER request\n");
+            ESP_LOGV(TAG, "received parameters in SET_PARAMETER request\n");
 
             handle_set_parameter_parameter(conn, req, resp);
         } else {
-            ESP_LOGD(TAG, "received unknown Content-Type %s in SET_PARAMETER request\n", ct);
+            ESP_LOGV(TAG, "received unknown Content-Type %s in SET_PARAMETER request\n", ct);
         }
     } else {
-        ESP_LOGD(TAG, "missing Content-Type header in SET_PARAMETER request\n");
+        ESP_LOGV(TAG, "missing Content-Type header in SET_PARAMETER request\n");
     }
 
     resp->respcode = 200;
@@ -667,6 +665,7 @@ static int rtsp_auth(char **nonce, rtsp_message *req, rtsp_message *resp) {
 }
 
 static void rtsp_conversation_thread_func(void *pconn) {
+    ESP_LOGD(TAG, "RTSP thread started");
     rtsp_conn_info *conn = pconn;
 
     rtsp_message *req, *resp;
@@ -709,6 +708,7 @@ respond:
         free(auth_nonce);
     ESP_LOGD(TAG, "terminating RTSP thread\n");
     conn->running = 0;
+    conn->thread = NULL;
     vTaskDelete(NULL);
 }
 
@@ -730,7 +730,6 @@ static const char* format_address(struct sockaddr *fsa) {
 }
 
 void rtsp_listen_loop(void) {
-    esp_log_level_set(TAG, ESP_LOG_DEBUG);
     struct addrinfo hints, *info, *p;
     char portstr[6];
     int *sockfd = NULL;

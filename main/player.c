@@ -201,7 +201,7 @@ void player_put_packet(seq_t seqno, uint8_t *data, int len) {
 
     if (xSemaphoreTake(ab_mutex, (TickType_t) 10)) { // RTP thread
         if (!ab_synced) {
-            ESP_LOGD(TAG, "syncing to first seqno %04X\n", seqno);
+            ESP_LOGV(TAG, "syncing to first seqno %04X\n", seqno);
             ab_write = seqno - 1;
             ab_read = seqno;
             ab_synced = 1;
@@ -216,7 +216,7 @@ void player_put_packet(seq_t seqno, uint8_t *data, int len) {
         } else if (seq_order(ab_read, seqno)) {     // late but not yet played
             abuf = audio_buffer + BUFIDX(seqno);
         } else {    // too late.
-            ESP_LOGD(TAG, "late packet %04X (%04X:%04X)", seqno, ab_read, ab_write);
+            ESP_LOGV(TAG, "late packet %04X (%04X:%04X)", seqno, ab_read, ab_write);
         }
         buf_fill = seq_diff(ab_read, ab_write);
         xSemaphoreGive(ab_mutex); // RTP thread
@@ -225,7 +225,8 @@ void player_put_packet(seq_t seqno, uint8_t *data, int len) {
     }
 
     if (abuf) {
-        alac_decode(abuf->data, data, len);
+        //alac_decode(abuf->data, data, len);
+        memcpy(abuf->data, data, len);
         abuf->ready = 1;
     }
     
@@ -342,7 +343,7 @@ static void bf_est_update(short fill) {
 
     bf_est_drift = biquad_filt(&bf_drift_lpf, CONTROL_B*(adj_error + err_deriv) + bf_est_drift);
 
-    ESP_LOGD(TAG, "bf %d err %f drift %f desiring %f ed %f estd %f\n",
+    ESP_LOGV(TAG, "bf %d err %f drift %f desiring %f ed %f estd %f\n",
           fill, bf_est_err, bf_est_drift, desired_fill, err_deriv, err_deriv + adj_error);
     bf_playback_rate = 1.0 + adj_error + bf_est_drift;
 
@@ -393,7 +394,7 @@ static short *buffer_get_frame(void) {
 
         curframe = audio_buffer + BUFIDX(read);
         if (!curframe->ready) {
-            ESP_LOGD(TAG, "missing frame %04X.", read);
+            ESP_LOGV(TAG, "missing frame %04X.", read);
             memset(curframe->data, 0, FRAME_BYTES(frame_size));
         }
         curframe->ready = 0;
@@ -445,6 +446,7 @@ static int stuff_buffer(double playback_rate, short *inptr, short *outptr) {
 }
 
 static void player_thread_func(void *arg) {
+    ESP_LOGD(TAG, "Starting player thread");
     int play_samples;
 
     signed short *inbuf, *outbuf, *silence;
@@ -492,8 +494,8 @@ static void player_thread_func(void *arg) {
             play_samples = srcdat.output_frames_gen;
         } else
 #endif
-        play_samples = stuff_buffer(bf_playback_rate, inbuf, outbuf);
-
+        //play_samples = stuff_buffer(bf_playback_rate, inbuf, outbuf);
+        play_samples = frame_size;
         config.output->play(outbuf, play_samples);
     }
     player_thread = NULL;
@@ -543,7 +545,8 @@ int player_play(stream_cfg *stream) {
 #endif
 
     config.output->start(sampling_rate);
-    xTaskCreate(player_thread_func, "Player Thread", 3072, NULL, 3, &player_thread);
+    BaseType_t ret = xTaskCreate(player_thread_func, "Player Thread", 4096, NULL, 3, &player_thread);
+    assert(ret == pdPASS);
     return 0;
 }
 
@@ -551,9 +554,8 @@ void player_stop(void) {
     if (player_thread != NULL && *listen_thread == xTaskGetCurrentTaskHandle()) {
         xTaskNotifyGive(player_thread);
         xTaskNotifyWait(0x01, 0x01, NULL, portMAX_DELAY);
+        config.output->stop();
+        free_buffer();
+        free_decoder();
     }
-
-    config.output->stop();
-    free_buffer();
-    free_decoder();
 }

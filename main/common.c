@@ -24,16 +24,11 @@
  * OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#include <stdio.h>
-#include <stdarg.h>
 #include <stdlib.h>
 #include <memory.h>
 
 #include <mbedtls/base64.h>
 #include <mbedtls/pk.h>
-#include <mbedtls/entropy.h>
-#include <mbedtls/ctr_drbg.h>
-
 #include "common.h"
 
 shairport_cfg config;

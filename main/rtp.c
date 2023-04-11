@@ -48,6 +48,7 @@ static TaskHandle_t rtp_thread;
 extern TaskHandle_t* listen_thread;
 
 static void rtp_receiver(void* arg) {
+    ESP_LOGD(TAG, "Starting RTP thread");
     // we inherit the signal mask (SIGUSR1)
     uint8_t packet[2048], *pktp;
 
@@ -80,10 +81,10 @@ static void rtp_receiver(void* arg) {
                 continue;
             }
             if (type == 0x56 && seqno == 0) {
-                ESP_LOGD(TAG, "resend-related request packet received, ignoring.\n");
+                ESP_LOGV(TAG, "resend-related request packet received, ignoring.\n");
                 continue;
             }
-            ESP_LOGD(TAG, "Unknown RTP packet of type 0x%02X length %d seqno %d\n", type, nread, seqno);
+            ESP_LOGV(TAG, "Unknown RTP packet of type 0x%02X length %d seqno %d\n", type, nread, seqno);
             continue;
         }
         ESP_LOGW(TAG, "Unknown RTP packet of type 0x%02X length %d", type, nread);
@@ -163,7 +164,8 @@ int rtp_setup(SOCKADDR *remote, int cport, int tport) {
 
     ESP_LOGD(TAG, "rtp listening on port %d\n", sport);
 
-    xTaskCreate(rtp_receiver, "RTP Receiver", 5120, NULL, 4, &rtp_thread);
+    BaseType_t ret = xTaskCreate(rtp_receiver, "RTP Receiver", 2048, NULL, 3, &rtp_thread);
+    assert(ret == pdPASS);
 
     return sport;
 }

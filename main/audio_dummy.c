@@ -103,8 +103,8 @@ static void start(int sample_rate) {
 
 static void play(short buf[], int samples) {
 //    printf("frame size: %d\n", samples);
-    size_t bytes_written;
-    i2s_write(I2S_NUM, buf, 4*samples, &bytes_written, 10);
+    //size_t bytes_written;
+    //i2s_write(I2S_NUM, buf, 4*samples, &bytes_written, 10);
     samples_played += samples;
     //vTaskDelay(8/portTICK_RATE_MS);
 }
