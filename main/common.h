@@ -1,7 +1,7 @@
 #ifndef _COMMON_H
 #define _COMMON_H
 
-#include <openssl/rsa.h>
+// #include <openssl/rsa.h>
 #include <stdint.h>
 #include <sys/socket.h>
 #include "audio.h"

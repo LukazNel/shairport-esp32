@@ -1,4 +1,5 @@
-build/
+*build*/
+managed_components/
 .idea/
 sdkconfig.old
 dependencies.lock

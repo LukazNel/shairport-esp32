@@ -30,22 +30,29 @@
 #include "audio.h"
 #include "driver/i2s.h"
 #include "driver/gpio.h"
+#include "soc/gpio_num.h"
 
 #define I2S_NUM     (0)
 
-#define WROVER_KIT
+//#define WROVER_KIT
 
 #ifdef WROVER_KIT
 #define I2S_WS      (GPIO_NUM_27)
 #define I2S_BCK     (GPIO_NUM_26)
 #define I2S_MCK     (I2S_PIN_NO_CHANGE)
 #define I2S_DO      (GPIO_NUM_25)
-#else
+#elifdef CONFIG_IDF_TARGET_ESP32
 #define I2S_WS      (GPIO_NUM_21)
 #define I2S_BCK     (GPIO_NUM_23)
 #define I2S_MCK     (GPIO_NUM_0)
 #define I2S_DO      (GPIO_NUM_19)
 #define MUTE        (GPIO_NUM_18)
+#elifdef CONFIG_IDF_TARGET_ESP32S3
+#define I2S_WS      (I2S_PIN_NO_CHANGE)
+#define I2S_BCK     (I2S_PIN_NO_CHANGE)
+#define I2S_MCK     (I2S_PIN_NO_CHANGE)
+#define I2S_DO      (I2S_PIN_NO_CHANGE)
+#define MUTE        (I2S_PIN_NO_CHANGE)
 #endif
 
 #define TASK_STACK  (2048)
